@@ -18,6 +18,42 @@ import re
 import clang.cindex
 from clang.cindex import CompilationDatabase, CursorKind, Diagnostic, TranslationUnit
 
+class Tagger:
+    def __init__(self):
+        self.tags = {}
+        self.current_file_name = None
+        self.current_file_lines = None
+
+    def tag(self, cursor, tagname):
+        """The complete tags file entry for symbol 'tag'."""
+        if self.current_file_name != realpath(cursor.location.file.name):
+            self.current_file_name = realpath(cursor.location.file.name)
+            debug("  opening " + self.current_file_name)
+            with open(self.current_file_name) as f:
+                self.current_file_lines = f.readlines()
+
+        if self.current_file_name not in self.tags:
+            self.tags[self.current_file_name] = set()
+
+        return self.tags[self.current_file_name].add((
+            self.current_file_lines[cursor.location.line - 1].rstrip(),
+            tagname,
+            cursor.location.line,
+            cursor.location.offset))
+
+class Entry:
+    def __init__(self, name, cursor=None):
+        self.children = []
+        self.children_map = {}
+        self.name = name
+        self.cursor = cursor
+    def has_child(self, name):
+        return name in self.children_map
+    def add_child(self, entry):
+        self.children_map[entry.name] = entry
+        self.children.append(entry)
+        return entry
+
 def main(argv):
     global args
     global initialCwd
@@ -31,6 +67,7 @@ def process_header(name):
     debug("  processing <" + name + "> header")
     tagger = Tagger()
     symbols = {}
+    root_entry = Entry("root")
     file_name = "/tmp/stl-stylizer." + name + ".cpp"
 
     os.chdir(initialCwd)
@@ -38,7 +75,7 @@ def process_header(name):
     out.write("#include <" + name + ">\nint main(int argc, char *argv[]) { return EXIT_SUCCESS; }")
     out.close()
 
-    do_tags([file_name], tagger, symbols)
+    do_tags([file_name], tagger, symbols, root_entry)
 
     os.chdir("..")
     if not os.path.exists("out"):
@@ -91,7 +128,7 @@ def clang_default_include():
     return next(line.strip() for line in out.split('\n') if reg.search(line))
 
 
-def do_tags(compiler_command_line, tagger, symbols):
+def do_tags(compiler_command_line, tagger, symbols, root_entry):
     index = clang.cindex.Index.create()
 
     compiler_command_line = ['-I', clang_default_include()] + compiler_command_line
@@ -114,20 +151,19 @@ def do_tags(compiler_command_line, tagger, symbols):
 
     start = time.time()
     for c in tu.cursor.get_children():
-        do_cursor(c, tagger, symbols)
+        do_cursor(c, tagger, symbols, root_entry)
     debug("  tag generation took %.2fs" % (time.time() - start))
 
-def do_cursor(cursor, tagger, symbols):
+def do_cursor(cursor, tagger, symbols, root_entry):
 
     if is_definition(cursor):
         parents = semantic_parents(cursor)
         directParent = symbols
 
         for p in parents:
-            pname = p['name']
-            if not pname in directParent:
-                directParent[pname] = {'$type':p['kind'], '$name':pname}
-            directParent = directParent[pname]
+            if not p.displayname in directParent:
+                directParent[p.displayname] = {'$type':p.kind.value, '$name':p.displayname}
+            directParent = directParent[p.displayname]
 
         name = cursor.displayname
 
@@ -138,11 +174,27 @@ def do_cursor(cursor, tagger, symbols):
             directParent[name]['$name'] = name
             directParent[name]['$cursor'] = cursor
 
+
+        direct_parent = root_entry
+
+        for p in parents:
+            if not direct_parent.has_child(p.displayname):
+                direct_parent = direct_parent.add_child(Entry(p.displayname, p))
+            else:
+                direct_parent = direct_parent.children_map[p.displayname]
+
+        name = cursor.displayname
+
+        if not direct_parent.has_child(name):
+            direct_parent.add_child(Entry(name, cursor))
+        else:
+            direct_parent.children_map[name].cursor = cursor
+
         tagger.tag(cursor, name)
 
     if should_tag_children(cursor):
         for c in cursor.get_children():
-            do_cursor(c, tagger, symbols)
+            do_cursor(c, tagger, symbols, root_entry)
 
 def is_definition(cursor):
     return (
@@ -164,7 +216,7 @@ def semantic_parents(cursor):
     p = collections.deque()
     c = cursor.semantic_parent
     while c and is_named_scope(c):
-        p.appendleft({'name':c.displayname, 'kind':c.kind.value})
+        p.appendleft(c)
         c = c.semantic_parent
     return list(p)
 
@@ -184,29 +236,6 @@ def is_named_scope(cursor):
         CursorKind.CLASS_TEMPLATE,
         CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
         ]
-
-class Tagger(object):
-    def __init__(self):
-        self.tags = {}
-        self.current_file_name = None
-        self.current_file_lines = None
-
-    def tag(self, cursor, tagname):
-        """The complete tags file entry for symbol 'tag'."""
-        if self.current_file_name != realpath(cursor.location.file.name):
-            self.current_file_name = realpath(cursor.location.file.name)
-            debug("  opening " + self.current_file_name)
-            with open(self.current_file_name) as f:
-                self.current_file_lines = f.readlines()
-
-        if self.current_file_name not in self.tags:
-            self.tags[self.current_file_name] = set()
-
-        return self.tags[self.current_file_name].add((
-            self.current_file_lines[cursor.location.line - 1].rstrip(),
-            tagname,
-            cursor.location.line,
-            cursor.location.offset))
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
