@@ -47,11 +47,13 @@ class Entry:
         self.children_map = {}
         self.name = name
         self.cursor = cursor
+        self.parent = None
     def has_child(self, name):
         return name in self.children_map
     def add_child(self, entry):
         self.children_map[entry.name] = entry
         self.children.append(entry)
+        entry.parent = self
         return entry
 
 def main(argv):
@@ -66,7 +68,6 @@ def main(argv):
 def process_header(name):
     debug("  processing <" + name + "> header")
     tagger = Tagger()
-    symbols = {}
     root_entry = Entry("root")
     file_name = "/tmp/stl-stylizer." + name + ".cpp"
 
@@ -75,36 +76,32 @@ def process_header(name):
     out.write("#include <" + name + ">\nint main(int argc, char *argv[]) { return EXIT_SUCCESS; }")
     out.close()
 
-    do_tags([file_name], tagger, symbols, root_entry)
+    do_tags([file_name], tagger, root_entry)
 
     os.chdir("..")
     if not os.path.exists("out"):
         os.makedirs("out")
 
     out = open("out/" + name + ".h", "wb")
-    process_symbols(out, symbols)
+    process_entry(out, root_entry)
     out.close()
 
     print("  generated out/" + name + ".h")
 
     os.chdir(initialCwd)
-    #json_output = json.dumps(symbols, sort_keys=True, indent=4, separators=(',', ': '))
-    #out = open("/tmp/stl-stylizer." + name + ".json", "wb")
-    #out.write(json_output)
-    #out.close()
 
-def write_namespace(out, symbols, name):
-    out.write("namespace " + name + " {\n")
-    process_symbols(out, symbols[name])
+def write_namespace(out, entry):
+    out.write("namespace " + entry.name + " {\n")
+    process_entry(out, entry)
     out.write("}\n")
 
-def write_class(out, symbols, name):
-    out.write("class " + name + " : public " + name + " {\n")
-    process_symbols(out, symbols[name])
+def write_class(out, entry):
+    out.write("class " + entry.name + " : public " + entry.name + " {\n")
+    process_entry(out, entry)
     out.write("}\n")
 
-def write_method(out, symbols, name):
-    out.write("\tvoid todo" + name + "  " + symbols["$name"] + "::" + name + ";\n")
+def write_method(out, entry):
+    out.write("\tvoid " + entry.name + " {\n\t\t" + entry.name + ";\n\t}\n")
 
 writers = {
     CursorKind.NAMESPACE.value: write_namespace,
@@ -113,12 +110,11 @@ writers = {
     CursorKind.CXX_METHOD.value: write_method
 }
 
-def process_symbols(out, symbols):
-    for s in symbols:
-        if s != "$type" and s != "$name" and s != "$cursor":
-            if symbols[s]['$type'] in writers:
-                writer = writers[symbols[s]['$type']]
-                writer(out, symbols, s)
+def process_entry(out, entry):
+    for child_entry in entry.children:
+        if child_entry.cursor.kind.value in writers:
+            writer = writers[child_entry.cursor.kind.value]
+            writer(out, child_entry)
 
 def clang_default_include():
     sub = subprocess.Popen(['clang', '-v', '-x', 'c++', '-'],
@@ -128,7 +124,7 @@ def clang_default_include():
     return next(line.strip() for line in out.split('\n') if reg.search(line))
 
 
-def do_tags(compiler_command_line, tagger, symbols, root_entry):
+def do_tags(compiler_command_line, tagger, root_entry):
     index = clang.cindex.Index.create()
 
     compiler_command_line = ['-I', clang_default_include()] + compiler_command_line
@@ -151,30 +147,13 @@ def do_tags(compiler_command_line, tagger, symbols, root_entry):
 
     start = time.time()
     for c in tu.cursor.get_children():
-        do_cursor(c, tagger, symbols, root_entry)
+        do_cursor(c, tagger, root_entry)
     debug("  tag generation took %.2fs" % (time.time() - start))
 
-def do_cursor(cursor, tagger, symbols, root_entry):
+def do_cursor(cursor, tagger, root_entry):
 
     if is_definition(cursor):
         parents = semantic_parents(cursor)
-        directParent = symbols
-
-        for p in parents:
-            if not p.displayname in directParent:
-                directParent[p.displayname] = {'$type':p.kind.value, '$name':p.displayname}
-            directParent = directParent[p.displayname]
-
-        name = cursor.displayname
-
-        if not name in directParent:
-            directParent[name] = {'$type':cursor.kind.value, '$name':name}
-        else:
-            directParent[name]['$type'] = cursor.kind.value
-            directParent[name]['$name'] = name
-            directParent[name]['$cursor'] = cursor
-
-
         direct_parent = root_entry
 
         for p in parents:
@@ -194,7 +173,7 @@ def do_cursor(cursor, tagger, symbols, root_entry):
 
     if should_tag_children(cursor):
         for c in cursor.get_children():
-            do_cursor(c, tagger, symbols, root_entry)
+            do_cursor(c, tagger, root_entry)
 
 def is_definition(cursor):
     return (
