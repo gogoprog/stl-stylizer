@@ -219,12 +219,16 @@ def write_namespace(out, entry):
 def write_class(out, entry):
     if entry.name[0] == '_':
         return
-    out.write("class " + snake_to_pascal_case(entry.name) + " : public ")
+    out.write("class " + snake_to_pascal_case(entry.name) + " : ")
     if len(entry.bases) > 0:
-        out.write(snake_to_pascal_case(entry.bases[0].displayname))
-    else:
-        out.write(entry.name)
+        if entry.bases[0].displayname[0] != "_":
+            out.write("public " + snake_to_pascal_case(entry.bases[0].displayname) + ", ")
+
+    out.write("public " + entry.name)
+
     out.write(" {\n")
+
+    out.write("public:\n\tusing " + entry.name + "::" + entry.name + ";\n")
     process_entry(out, entry)
     out.write("}\n")
 
